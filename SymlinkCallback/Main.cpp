@@ -30,10 +30,10 @@ NTSYSAPI
 NTSTATUS
 NTAPI
 ZwCreateSymbolicLinkObject (
-    _Out_ PHANDLE             pHandle,
-    _In_ ACCESS_MASK          DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES   ObjectAttributes,
-    _In_ PUNICODE_STRING      DestinationName
+    _Out_ PHANDLE pHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PUNICODE_STRING DestinationName
 );
 
 NTSYSAPI 
@@ -52,10 +52,10 @@ ObReferenceObjectByName (
 
 __declspec(code_seg(".call$1"))
 NTSTATUS
-SymLinkCallback(
+SymLinkCallback (
     _In_ POBJECT_SYMBOLIC_LINK Symlink,
     _In_ PVOID SymlinkContext,
-    _In_ PUNICODE_STRING SymlinkPath,
+    _Out_ PUNICODE_STRING SymlinkPath,
     _Outptr_ PVOID* Object
 );
 
@@ -65,7 +65,6 @@ EXTERN_C_END
 
 UNICODE_STRING origStr;
 POBJECT_SYMBOLIC_LINK symlinkObj;
-POBJECT_SYMBOLIC_LINK fakeSymlinkObj;
 
 _Use_decl_annotations_
 VOID
@@ -75,13 +74,23 @@ DriverUnload (
 {
     UNREFERENCED_PARAMETER(DriverObject);
 
-    symlinkObj->LinkTarget = origStr;
     symlinkObj->Flags &= ~0x10;
+    symlinkObj->LinkTarget = origStr;
 
     ObDereferenceObject(symlinkObj);
-    ObDereferenceObject(fakeSymlinkObj);
 }
 
+//
+// To avoid a race condition when modifying the symlink object
+// we are using a trick:
+// We make sure our callback function is aligned to 64k so
+// while the flags are not yet changed and the callback is still
+// treated as a unicode string, the last 2 bytes are 0000 so the 
+// string length is 0, and the buffer is ignored.
+// To achieve that, we create a section that contains a buffer
+// sized 0xb000 and make sure our callback function is located after it, 
+// and so it is aligned to 64k.
+//
 #pragma section(".call$0",write)
 __declspec(allocate(".call$0")) UCHAR buffer[0xb000] = { 0 };
 
@@ -98,47 +107,62 @@ DriverEntry (
 
     NTSTATUS status;
     HANDLE symLinkHandle = NULL;
-    HANDLE fakeSymlinkHandle;
     UNICODE_STRING symlinkName = RTL_CONSTANT_STRING(L"\\GLOBAL??\\c:");
-    UNICODE_STRING symlinkFakeName = RTL_CONSTANT_STRING(L"\\AAA");
-    OBJECT_ATTRIBUTES objAttr = RTL_CONSTANT_OBJECT_ATTRIBUTES(&symlinkName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE);
-    OBJECT_ATTRIBUTES fakeSymlinkObjAttr = RTL_CONSTANT_OBJECT_ATTRIBUTES(&symlinkFakeName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE);
+    OBJECT_ATTRIBUTES objAttr = RTL_CONSTANT_OBJECT_ATTRIBUTES(&symlinkName, 
+                                                               OBJ_KERNEL_HANDLE | 
+                                                               OBJ_CASE_INSENSITIVE);
 
     DriverObject->DriverUnload = DriverUnload;
-    status = ZwOpenSymbolicLinkObject(&symLinkHandle, SYMBOLIC_LINK_ALL_ACCESS, &objAttr);
+
+    //
+    // Open a handle to the symbolic link object for C: directory, 
+    // so we can hook it
+    //
+    status = ZwOpenSymbolicLinkObject(&symLinkHandle, 
+                                      SYMBOLIC_LINK_ALL_ACCESS, 
+                                      &objAttr);
 
     if (!NT_SUCCESS(status))
     {
-        DbgPrintEx(77, 0, "Failed opening symbolic link with error: %x", status);
-        goto Exit;
-    }
-    
-    status = ObReferenceObjectByHandle(symLinkHandle, SYMBOLIC_LINK_ALL_ACCESS, NULL, KernelMode, (PVOID*)&symlinkObj, NULL);
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrintEx(77, 0, "Failed referencing symbolic link with error: %x", status);
+        DbgPrintEx(77, 
+                   0, 
+                   "Failed opening symbolic link with error: %x", 
+                   status);
         goto Exit;
     }
 
-    status = ZwCreateSymbolicLinkObject(&fakeSymlinkHandle, SYMBOLIC_LINK_ALL_ACCESS, &fakeSymlinkObjAttr, &symlinkObj->LinkTarget);
+    //
+    // Get the symbolic link object 
+    //
+    status = ObReferenceObjectByHandle(symLinkHandle, 
+                                       SYMBOLIC_LINK_ALL_ACCESS, 
+                                       NULL, 
+                                       KernelMode, 
+                                       (PVOID*)&symlinkObj, 
+                                       NULL);
     if (!NT_SUCCESS(status))
     {
-        DbgPrintEx(77, 0, "Failed creating fake symbolic link with error: %x", status);
+        DbgPrintEx(77, 
+                   0, 
+                   "Failed referencing symbolic link with error: %x", 
+                   status);
         goto Exit;
     }
 
-    status = ObReferenceObjectByHandle(fakeSymlinkHandle, SYMBOLIC_LINK_ALL_ACCESS, NULL, KernelMode, (PVOID*)&fakeSymlinkObj, NULL);
-    ObCloseHandle(&fakeSymlinkHandle, KernelMode);
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrintEx(77, 0, "Failed referencing fake symlink with error: %x", status);
-        goto Exit;
-    }
-    
+    //
+    // Save the original string that the symlink points to
+    // so we can change the object back when we unload
+    //
     origStr = symlinkObj->LinkTarget;
 
+    //
+    // Modify the symlink to point to our callback instead of the string
+    // and change the flags so the union will be treated as a callback. 
+    // Set CallbackContext to the original string so we can 
+    // return it from the callback and allow the system to run normally. 
+    //
     symlinkObj->Callback = SymLinkCallback;
-    symlinkObj->CallbackContext = fakeSymlinkObj;
+    symlinkObj->CallbackContext = &origStr;
     symlinkObj->Flags |= 0x10;
 
 Exit:
@@ -152,12 +176,18 @@ NTSTATUS
 SymLinkCallback (
     _In_ POBJECT_SYMBOLIC_LINK Symlink,
     _In_ PVOID SymlinkContext,
-    _In_ PUNICODE_STRING SymlinkPath,
+    _Out_ PUNICODE_STRING SymlinkPath,
     _Outptr_ PVOID* Object)
 {
     UNREFERENCED_PARAMETER(Symlink);
-    UNREFERENCED_PARAMETER(SymlinkPath);
 
-    *Object = SymlinkContext;
-    return STATUS_REPARSE;
+    //
+    // We need to either return the right object for this symlink
+    // or the correct target string.
+    // It's a lot easier to get the string, so we can set Object to Null. 
+    //
+    *Object = NULL;
+    *SymlinkPath = *(PUNICODE_STRING)(SymlinkContext);  // OrigStr
+
+    return STATUS_SUCCESS;
 }
