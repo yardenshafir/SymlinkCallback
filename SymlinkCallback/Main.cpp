@@ -63,6 +63,8 @@ extern POBJECT_TYPE *IoDeviceObjectType;
 
 EXTERN_C_END
 
+#define OBJECT_SYMBOLIC_LINK_USE_CALLBACK 0x10
+
 UNICODE_STRING origStr;
 POBJECT_SYMBOLIC_LINK symlinkObj;
 
@@ -73,8 +75,8 @@ DriverUnload (
 )
 {
     UNREFERENCED_PARAMETER(DriverObject);
-
-    symlinkObj->Flags &= ~0x10;
+    symlinkObj->Flags &= ~OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
+    _MemoryBarrier();
     symlinkObj->LinkTarget = origStr;
 
     ObDereferenceObject(symlinkObj);
@@ -163,7 +165,7 @@ DriverEntry (
     //
     symlinkObj->Callback = SymLinkCallback;
     symlinkObj->CallbackContext = &origStr;
-    symlinkObj->Flags |= 0x10;
+    symlinkObj->Flags |= OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
 
 Exit:
     return status;
