@@ -26,16 +26,6 @@ typedef struct _OBJECT_SYMBOLIC_LINK
     /* 0x0024 */ long __PADDING__[1];
 } OBJECT_SYMBOLIC_LINK, *POBJECT_SYMBOLIC_LINK; /* size: 0x0028 */
 
-NTSYSAPI
-NTSTATUS
-NTAPI
-ZwCreateSymbolicLinkObject (
-    _Out_ PHANDLE pHandle,
-    _In_ ACCESS_MASK DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
-    _In_ PUNICODE_STRING DestinationName
-);
-
 NTSYSAPI 
 NTSTATUS 
 NTAPI 
@@ -59,8 +49,6 @@ SymLinkCallback (
     _Outptr_ PVOID* Object
 );
 
-extern POBJECT_TYPE *IoDeviceObjectType;
-
 EXTERN_C_END
 
 #define OBJECT_SYMBOLIC_LINK_USE_CALLBACK 0x10
@@ -76,7 +64,7 @@ DriverUnload (
 {
     UNREFERENCED_PARAMETER(DriverObject);
     symlinkObj->Flags &= ~OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
-    _MemoryBarrier();
+    MemoryBarrier();
     symlinkObj->LinkTarget = origStr;
 
     ObDereferenceObject(symlinkObj);
@@ -165,6 +153,7 @@ DriverEntry (
     //
     symlinkObj->Callback = SymLinkCallback;
     symlinkObj->CallbackContext = &origStr;
+    MemoryBarrier();
     symlinkObj->Flags |= OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
 
 Exit:
