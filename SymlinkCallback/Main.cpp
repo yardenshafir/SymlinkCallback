@@ -37,10 +37,13 @@ EXTERN_C_START
 __declspec(code_seg(".call$1")) SYMLINK_CALLBACK_FUNCTION SymLinkCallback;
 DRIVER_INITIALIZE DriverEntry;
 DRIVER_UNLOAD DriverUnload;
+DRIVER_DISPATCH SymHookCreate;
 EXTERN_C_END
 
+DECLARE_UNICODE_STRING_SIZE(g_DeviceName, 64);
 UNICODE_STRING g_LinkPath;
 POBJECT_SYMBOLIC_LINK g_SymLinkObject;
+PDEVICE_OBJECT g_DeviceObject;
 
 _Use_decl_annotations_
 VOID
@@ -56,6 +59,11 @@ DriverUnload (
     g_SymLinkObject->Flags &= ~OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
     MemoryBarrier();
     g_SymLinkObject->LinkTarget = g_LinkPath;
+
+    //
+    // Delete our device object
+    //
+    IoDeleteDevice(g_DeviceObject);
 
     //
     // Dereference the symbolic link object
@@ -78,6 +86,96 @@ DriverUnload (
 __declspec(allocate(".call$0")) UCHAR _pad_[0xB000] = { 0 };
 
 #pragma code_seg(".text")
+NTSTATUS
+SymHookCreate (
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp
+    )
+{
+    PIO_STACK_LOCATION ioStack;
+    PFILE_OBJECT fileObject;
+    USHORT bufferLength;
+    NTSTATUS status;
+    PWCHAR buffer;
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    //
+    // Get the FILE_OBJECT from the I/O Stack Location
+    //
+    ioStack = IoGetCurrentIrpStackLocation(Irp);
+    fileObject = ioStack->FileObject;
+
+    //
+    // Print the file name being accessed
+    //
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID,
+               DPFLTR_ERROR_LEVEL,
+               "Opening file %wZ\n",
+               &fileObject->FileName);
+
+    //
+    // Allocate space for the original device name, plus the size of the
+    // file name, and adding space for the terminating NUL.
+    //
+    bufferLength = fileObject->FileName.Length -
+                   g_LinkPath.Length +
+                   sizeof(UNICODE_NULL);
+    buffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, bufferLength, 'maNF');
+    if (buffer == NULL)
+    {
+        status =  STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+
+    //
+    // Append the original device name first
+    //
+    buffer[0] = UNICODE_NULL;
+    NT_VERIFY(NT_SUCCESS(RtlStringCbCatNW(buffer,
+                                          bufferLength,
+                                          g_LinkPath.Buffer,
+                                          g_LinkPath.Length)));
+
+    //
+    // Then add the name of the file name
+    //
+    NT_VERIFY(NT_SUCCESS(RtlStringCbCatNW(buffer,
+                                          bufferLength,
+                                          fileObject->FileName.Buffer,
+                                          fileObject->FileName.Length)));
+
+    //
+    // Ask the I/O manager to free the original file name and use ours instead
+    //
+    status = IoReplaceFileObjectName(fileObject,
+                                     buffer,
+                                     bufferLength - sizeof(UNICODE_NULL));
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "Failed to swap file object name: %lx\n",
+                   status);
+        ExFreePool(buffer);
+        goto Exit;
+    }
+
+    //
+    // Return a reparse operation so that the I/O manager uses the new file
+    // object name for its lookup, and starts over
+    //
+    Irp->IoStatus.Information = IO_REPARSE;
+    status = STATUS_REPARSE;
+
+Exit:
+    //
+    // Complete the IRP with the relevant status code
+    //
+    Irp->IoStatus.Status = status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+
 _Use_decl_annotations_
 NTSTATUS
 DriverEntry (
@@ -147,6 +245,35 @@ DriverEntry (
     }
 
     //
+    // Create our device object hook
+    //
+    RtlAppendUnicodeToString(&g_DeviceName, L"\\Device\\HarddiskVolume0");
+    status = IoCreateDevice(DriverObject,
+                            0,
+                            &g_DeviceName,
+                            FILE_DEVICE_UNKNOWN,
+                            0,
+                            FALSE,
+                            &g_DeviceObject);
+    if (!NT_SUCCESS(status))
+    {
+        //
+        // Fail, and drop the symlink object reference
+        //
+        ObDereferenceObject(g_SymLinkObject);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "Failed create devobj with error: %lx\n",
+                   status);
+        goto Exit;
+    }
+
+    //
+    // Attach our create handler
+    //
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = SymHookCreate;
+
+    //
     // Save the original string that the symlink points to
     // so we can change the object back when we unload
     //
@@ -159,7 +286,7 @@ DriverEntry (
     // return it from the callback and allow the system to run normally.
     //
     g_SymLinkObject->Callback = SymLinkCallback;
-    g_SymLinkObject->CallbackContext = &g_LinkPath;
+    g_SymLinkObject->CallbackContext = &g_DeviceName;
     MemoryBarrier();
     g_SymLinkObject->Flags |= OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
 
