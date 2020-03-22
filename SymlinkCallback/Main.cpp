@@ -117,7 +117,7 @@ SymHookCreate (
     // Allocate space for the original device name, plus the size of the
     // file name, and adding space for the terminating NUL.
     //
-    bufferLength = fileObject->FileName.Length -
+    bufferLength = fileObject->FileName.Length +
                    g_LinkPath.Length +
                    sizeof(UNICODE_NULL);
     buffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, bufferLength, 'maNF');
