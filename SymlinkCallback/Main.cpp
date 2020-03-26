@@ -259,7 +259,7 @@ DriverEntry (
                             0,
                             &g_DeviceName,
                             FILE_DEVICE_UNKNOWN,
-                            0,
+                            FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL,
                             FALSE,
                             &g_DeviceObject);
     if (!NT_SUCCESS(status))
