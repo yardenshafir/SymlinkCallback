@@ -40,6 +40,7 @@ DRIVER_UNLOAD DriverUnload;
 DRIVER_DISPATCH SymHookCreate;
 EXTERN_C_END
 
+DECLARE_GLOBAL_CONST_UNICODE_STRING(g_TailName, L"\\Foo");
 DECLARE_UNICODE_STRING_SIZE(g_DeviceName, 64);
 UNICODE_STRING g_LinkPath;
 POBJECT_SYMBOLIC_LINK g_SymLinkObject;
@@ -106,18 +107,22 @@ SymHookCreate (
     fileObject = ioStack->FileObject;
 
     //
-    // Print the file name being accessed
+    // If this is someone directly trying to access our device object,
+    // fail them, so that we do not crash the system (since we should
+    // not reparse direct opens).
     //
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID,
-               DPFLTR_ERROR_LEVEL,
-               "Opening file %wZ\n",
-               &fileObject->FileName);
+    if (fileObject->FileName.Length < g_TailName.Length)
+    {
+        status = STATUS_ACCESS_DENIED;
+        goto Exit;
+    }
 
     //
     // Allocate space for the original device name, plus the size of the
-    // file name, and adding space for the terminating NUL.
+    // file name, minus "\Foo", and adding space for the terminating NUL.
     //
-    bufferLength = fileObject->FileName.Length +
+    bufferLength = fileObject->FileName.Length -
+                   g_TailName.Length +
                    g_LinkPath.Length +
                    sizeof(UNICODE_NULL);
     buffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, bufferLength, 'maNF');
@@ -137,12 +142,14 @@ SymHookCreate (
                                           g_LinkPath.Length)));
 
     //
-    // Then add the name of the file name
+    // Then add the name of the file name, minus "\Foo"
     //
     NT_VERIFY(NT_SUCCESS(RtlStringCbCatNW(buffer,
                                           bufferLength,
-                                          fileObject->FileName.Buffer,
-                                          fileObject->FileName.Length)));
+                                          fileObject->FileName.Buffer +
+                                          (g_TailName.Length / sizeof(g_TailName.Buffer[0])),
+                                          fileObject->FileName.Length -
+                                          g_TailName.Length)));
 
     //
     // Ask the I/O manager to free the original file name and use ours instead
@@ -286,6 +293,7 @@ DriverEntry (
     // return it from the callback and allow the system to run normally.
     //
     g_SymLinkObject->Callback = SymLinkCallback;
+    RtlAppendUnicodeStringToString(&g_DeviceName, &g_TailName);
     g_SymLinkObject->CallbackContext = &g_DeviceName;
     MemoryBarrier();
     g_SymLinkObject->Flags |= OBJECT_SYMBOLIC_LINK_USE_CALLBACK;
